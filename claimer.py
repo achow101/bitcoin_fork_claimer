@@ -552,68 +552,101 @@ class BitcoinFork(object):
         self.SCRIPT_ADDRESS = chr(5)
         self.bch_fork = False
         
-    def maketx_segwitsig(self, sourcetx, sourceidx, sourceh160, signscript, sourcesatoshis, sourceprivkey, pubkey, compressed, outscript, fee, keytype):
+    def maketx_segwitsig(self, inputs, outscript, fee):
         version = struct.pack("<I", self.txversion)
-        prevout = sourcetx.decode("hex")[::-1] + struct.pack("<I", sourceidx)
         sequence = struct.pack("<i", -1)
-        inscript = lengthprefixed(signscript)
-        satoshis = struct.pack("<Q", sourcesatoshis)
         txout = struct.pack("<Q", sourcesatoshis - fee) + lengthprefixed(outscript)
         locktime = struct.pack("<I", 0)
         sigtype = struct.pack("<I", self.signid)
         
-        to_sign = version + self.BCDgarbage + doublesha(prevout) + doublesha(sequence) + prevout + inscript + satoshis + sequence + doublesha(txout) + locktime + sigtype + self.extrabytes
-        
-        signature = signdata(sourceprivkey, to_sign) + make_varint(self.signtype)
-        serpubkey = serializepubkey(pubkey, compressed)
+        # hash things
+        prevouts_preimg = b""
+        sequence_preimg = b""
+        for sourcetx, sourceidx, sourceh160, signscript, sourcesatoshis, sourceprivkey, pubkey, compressed, keytype in inputs:
+            prevouts_preimg += sourcetx.decode("hex")[::-1] + struct.pack("<I", sourceidx)
+            sequence_preimg += sequence
+        hashprevouts = doublesha(prevouts_preimg)
+        hashseqeunce = doublesha(sequence_preimg)
 
-        if keytype == "p2pk":
-            sigblock = lengthprefixed(signature)
-        else:
-            sigblock = lengthprefixed(signature) + lengthprefixed(serpubkey)
+        plaintx = version + self.BCDgarbage + make_varint(len(inputs))
+        is_segwit = False
+        sigblocks = []
+        for sourcetx, sourceidx, sourceh160, signscript, sourcesatoshis, sourceprivkey, pubkey, compressed in inputs:
+            prevout = sourcetx.decode("hex")[::-1] + struct.pack("<I", sourceidx)
+            inscript = lengthprefixed(signscript)
+            satoshis = struct.pack("<Q", sourcesatoshis)
+            to_sign = version + self.BCDgarbage + hashprevouts + hashseqeunce + prevout + inscript + satoshis + sequence + doublesha(txout) + locktime + sigtype + self.extrabytes
 
-        if keytype in ("p2pk", "standard"):
-            script = lengthprefixed(sigblock)
-        elif keytype == "segwit":
-            script = "\x17\x16\x00\x14" + sourceh160
-        elif keytype == "segwitbech32":
-            script = "\x00"
-        else:
-            raise Exception("Not implemented!")
-            
-        plaintx = version + self.BCDgarbage + make_varint(1) + prevout + script + sequence + make_varint(1) + txout + locktime
-        
-        if keytype in ("p2pk", "standard"):
+            signature = signdata(sourceprivkey, to_sign) + make_varint(self.signtype)
+            serpubkey = serializepubkey(pubkey, compressed)
+
+            if keytype == "p2pk":
+                sigblock = lengthprefixed(signature)
+            else:
+                sigblock = lengthprefixed(signature) + lengthprefixed(serpubkey)
+
+            if keytype in ("p2pk", "standard"):
+                script = lengthprefixed(sigblock)
+            elif keytype == "segwit":
+                script = "\x17\x16\x00\x14" + sourceh160
+                sigblocks.append(sigblock)
+                is_segwit = True
+            elif keytype == "segwitbech32":
+                script = "\x00"
+                sigblocks.append(sigblock)
+                is_segwit = True
+            else:
+                raise Exception("Not implemented!")
+
+            plaintx += prevout + script + sequence
+        plaintx += make_varint(1) + txout + locktime
+
+        if not is_segwit:
             return plaintx, plaintx
         else:
-            witnesstx = version + self.BCDgarbage + "\x00\x01" + plaintx[4+len(self.BCDgarbage):-4] + "\x02" + sigblock + locktime
+            witnesstx = version + self.BCDgarbage + "\x00\x01" + plaintx[4+len(self.BCDgarbage):-4]
+            for sigblock in sigblocks:
+                witnesstx + "\x02" + sigblock
+            witnesstx += locktime
             return witnesstx, plaintx
-        
-    def maketx_basicsig(self, sourcetx, sourceidx, sourceh160, signscript, sourcesatoshis, sourceprivkey, pubkey, compressed, outscript, fee, keytype):
+
+    def maketx_basicsig(self, inputs, outscript, fee):
         if keytype in ("segwit", "segwitbech32"):
-            return self.maketx_segwitsig(sourcetx, sourceidx, sourceh160, signscript, sourcesatoshis, sourceprivkey, pubkey, compressed, outscript, fee, keytype)
+            return self.maketx_segwitsig(inputs, outscript, fee)
             
         version = struct.pack("<I", self.txversion)
-        prevout = sourcetx.decode("hex")[::-1] + struct.pack("<I", sourceidx)
         sequence = struct.pack("<i", -1)
-        inscript = lengthprefixed(signscript)
         txout = struct.pack("<Q", sourcesatoshis - fee) + lengthprefixed(outscript)
         locktime = struct.pack("<I", 0)
         sigtype = struct.pack("<I", self.signid)
-        
-        to_sign = version + self.BCDgarbage + make_varint(1) + prevout + inscript + sequence + make_varint(1) + txout + locktime + sigtype + self.extrabytes
-        
-        signature = signdata(sourceprivkey, to_sign) + make_varint(self.signtype)
-        serpubkey = serializepubkey(pubkey, compressed)
-        
-        if keytype == "p2pk":
-            sigblock = lengthprefixed(signature)
-        else:
-            sigblock = lengthprefixed(signature) + lengthprefixed(serpubkey)
-        
-        plaintx = version + self.BCDgarbage + make_varint(1) + prevout + lengthprefixed(sigblock) + sequence + make_varint(1) + txout + locktime
+
+        plaintx = version + self.BCDgarbage + make_varint(len(inputs))
+        for sourcetx, sourceidx, sourceh160, signscript, sourcesatoshis, sourceprivkey, pubkey, compressed, keytype in inputs:
+            prevout = sourcetx.decode("hex")[::-1] + struct.pack("<I", sourceidx)
+            inscript = lengthprefixed(signscript)
+            to_sign = version + self.BCDgarbage + make_varint(len(inputs))
+
+            for sourcetx_in, sourceidx_in, sourceh160_in, signscript_in, sourcesatoshis_in, sourceprivkey_in, pubkey_in, compressed_in in inputs:
+                if sourcetx_in == sourcetx and sourceidx == sourceidx_in:
+                    to_sign += prevout + inscript + sequence
+                else:
+                    prevout_in = sourcetx.decode("hex")[::-1] + struct.pack("<I", sourceidx)
+                    to_sign += prevout_in + make_varint(0) + sequence
+
+            to_sign += make_varint(1) + txout + locktime + sigtype + self.extrabytes
+
+            signature = signdata(sourceprivkey, to_sign) + make_varint(self.signtype)
+            serpubkey = serializepubkey(pubkey, compressed)
+
+            if keytype == "p2pk":
+                sigblock = lengthprefixed(signature)
+            else:
+                sigblock = lengthprefixed(signature) + lengthprefixed(serpubkey)
+            plaintx += prevout + lengthprefixed(sigblock) + sequence
+
+        plaintx += make_varint(1) + txout + locktime
         return plaintx, plaintx
-        
+
 class BitcoinFaith(BitcoinFork):
     def __init__(self):
         BitcoinFork.__init__(self)
@@ -1021,7 +1054,7 @@ else:
         raise Exception("The destination address %s does not match BTC or %s. Are you sure you got the right one?" % (args.destaddr, coin.ticker))
 
 if keytype in ("p2pk", "standard", "segwit", "segwitbech32"):
-    tx, plaintx = coin.maketx(args.txid, txindex, sourceh160, signscript, satoshis, privkey, pubkey, compressed, outscript, args.fee, keytype)
+    tx, plaintx = coin.maketx([](args.txid, txindex, sourceh160, signscript, satoshis, privkey, pubkey, compressed, keytype)], outscript, args.fee)
     txhash = doublesha(plaintx)
 else:
     raise Exception("Not implemented!")
