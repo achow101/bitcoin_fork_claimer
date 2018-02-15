@@ -554,10 +554,10 @@ class BitcoinFork(object):
         self.SCRIPT_ADDRESS = chr(5)
         self.bch_fork = False
         
-    def maketx_segwitsig(self, inputs, outscript, fee):
+    def maketx_segwitsig(self, inputs, outscript, fee, input_satoshis):
         version = struct.pack("<I", self.txversion)
         sequence = struct.pack("<i", -1)
-        txout = struct.pack("<Q", sourcesatoshis - fee) + lengthprefixed(outscript)
+        txout = struct.pack("<Q", input_satoshis - fee) + lengthprefixed(outscript)
         locktime = struct.pack("<I", 0)
         sigtype = struct.pack("<I", self.signid)
         
@@ -612,13 +612,13 @@ class BitcoinFork(object):
             witnesstx += locktime
             return witnesstx, plaintx
 
-    def maketx_basicsig(self, inputs, outscript, fee):
+    def maketx_basicsig(self, inputs, outscript, fee, input_satoshis):
         if keytype in ("segwit", "segwitbech32"):
-            return self.maketx_segwitsig(inputs, outscript, fee)
+            return self.maketx_segwitsig(inputs, outscript, fee, input_satoshis)
             
         version = struct.pack("<I", self.txversion)
         sequence = struct.pack("<i", -1)
-        txout = struct.pack("<Q", sourcesatoshis - fee) + lengthprefixed(outscript)
+        txout = struct.pack("<Q", input_satoshis - fee) + lengthprefixed(outscript)
         locktime = struct.pack("<I", 0)
         sigtype = struct.pack("<I", self.signid)
 
@@ -944,14 +944,14 @@ assert gen_k_rfc6979(0xc9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b1
 
 parser = argparse.ArgumentParser()
 parser.add_argument("cointicker", help="Coin type", choices=["BTF", "BTW", "BTG", "BCX", "B2X", "UBTC", "SBTC", "BCD", "BPA", "BTN", "BTH", "BTV", "BTT", "BTX", "BTP", "BCK", "CDY", "BTSQ", "WBTC", "BCH"])
-parser.add_argument("wifkey", help="Private key of the coins to be claimed in WIF (wallet import) format")
-parser.add_argument("srcaddr", help="Source address of the coins")
 parser.add_argument("destaddr", help="Destination address of the coins")
+parser.add_argument("--wifkeys", "-w", help="Private key of the coins to be claimed in WIF (wallet import) format", nargs='+', required=True)
+parser.add_argument("--srcaddrs", "-s", help="Source address of the coins", nargs='+', required=True)
 parser.add_argument("--fee", help="Fee measured in Satoshis, default is 1000", type=int, default=1000)
 parser.add_argument("--txid", help="Transaction ID with the source of the coins, skips blockchain.info API query", type=str)
 parser.add_argument("--txindex", help="Manually specified txindex, skips blockchain.info API query", type=int)
 parser.add_argument("--satoshis", help="Manually specified number of satoshis, skips blockchain.info API query", type=int)
-parser.add_argument("--p2pk", help="Source is P2PK. Use this if you have REALLY old coins (2009-2010) and normal mode fails", action="store_true")
+parser.add_argument("--p2pk", help="Source addresses are P2PK. Use this if you have REALLY old coins (2009-2010) and normal mode fails", action="store_true")
 parser.add_argument("--height", help="Manually specified block height of transaction, optional", type=int)
 
 args = parser.parse_args()
@@ -1002,66 +1002,69 @@ if args.height and coin.hardforkheight < args.height:
     print "(fork at height %d)" % coin.hardforkheight
     exit()
 
-keytype, privkey, pubkey, sourceh160, compressed = identify_keytype(args.wifkey, args.srcaddr)
+inputs = []
+total_sats = 0
+for key, addr in zip(args.wifkeys, args.srcaddrs):
+    keytype, privkey, pubkey, sourceh160, compressed = identify_keytype(key, addr)
 
-if args.p2pk:
-    keytype = "p2pk"
-    srcscript = lengthprefixed(serializepubkey(pubkey, compressed)) + "\xac"
-elif keytype == "standard":
-    srcscript = "\x76\xa9\x14" + sourceh160 + "\x88\xac"
-elif keytype == "segwit":
-    srcscript = "\xa9\x14" + hash160("\x00\x14" + sourceh160) + "\x87"
-elif keytype == "segwitbech32":
-    srcscript = "\x00\x14" + sourceh160
-else:
-    raise Exception("Not implemented!")
-
-if coin.bch_fork and keytype not in ("p2pk", "standard"):
-    raise Exception("Segwit is not enabled for BCH and its forks!")
-
-if keytype in ("p2pk", "standard"):
-    signscript = srcscript
-else:
-    signscript = "\x76\xa9\x14" + sourceh160 + "\x88\xac"
-
-if args.txid is not None and args.txindex is not None and args.satoshis is not None:
-    txid, txindex, satoshis = args.txindex, args.txindex, args.satoshis
-else:
-    if args.cointicker == "BTX":
-        addr_txs = get_btx_details_from_chainz_cryptoid(args.srcaddr)
-    elif args.cointicker == "CDY":
-        raise Exception("Block explorer for BCH forks not supported yet. Please specify txindex and satoshis manually.")
+    if args.p2pk:
+        keytype = "p2pk"
+        srcscript = lengthprefixed(serializepubkey(pubkey, compressed)) + "\xac"
+    elif keytype == "standard":
+        srcscript = "\x76\xa9\x14" + sourceh160 + "\x88\xac"
+    elif keytype == "segwit":
+        srcscript = "\xa9\x14" + hash160("\x00\x14" + sourceh160) + "\x87"
+    elif keytype == "segwitbech32":
+        srcscript = "\x00\x14" + sourceh160
     else:
-        addr_txs = get_addr_details_from_blockchaininfo(args.srcaddr, coin.hardforkheight)
+        raise Exception("Not implemented!")
+
+    if coin.bch_fork and keytype not in ("p2pk", "standard"):
+        raise Exception("Segwit is not enabled for BCH and its forks!")
+
+    if keytype in ("p2pk", "standard"):
+        signscript = srcscript
+    else:
+        signscript = "\x76\xa9\x14" + sourceh160 + "\x88\xac"
+
+    if args.txid is not None and args.txindex is not None and args.satoshis is not None:
+        txid, txindex, satoshis = args.txindex, args.txindex, args.satoshis
+    else:
+        if args.cointicker == "BTX":
+            addr_txs = get_btx_details_from_chainz_cryptoid(args.srcaddr)
+        elif args.cointicker == "CDY":
+            raise Exception("Block explorer for BCH forks not supported yet. Please specify txindex and satoshis manually.")
+        else:
+            addr_txs = get_addr_details_from_blockchaininfo(args.srcaddr, coin.hardforkheight)
+
+        for txid, txindex, bciscript, satoshis in addr_txs:
+            if bciscript != srcscript:
+                raise Exception("Script type in source output that is not supported!")
+
+    if args.destaddr.startswith("bc1"):
+        addr = bech32decode(args.destaddr)
+        assert len(addr) == 20
+        print "YOU ARE TRYING TO SEND TO A bech32 ADDRESS! THIS IS NOT NORMAL! Are you sure you know what you're doing?"
+        get_consent("I am aware that the destination address is bech32")
+        outscript = "\x00\x14" + addr
+    else:
+        addr = b58decode(args.destaddr)
+        assert len(addr) == 21
+        if addr[0] == "\x00" or addr[0] == coin.PUBKEY_ADDRESS:
+            outscript = "\x76\xa9\x14" + addr[1:] + "\x88\xac"
+        elif addr[0] == "\x05" or addr[0] == coin.SCRIPT_ADDRESS:
+            print "YOU ARE TRYING TO SEND TO A P2SH ADDRESS! THIS IS NOT NORMAL! Are you sure you know what you're doing?"
+            get_consent("I am aware that the destination address is P2SH")
+            outscript = "\xa9\x14" + addr[1:] + "\x87"
+        else:
+            raise Exception("The destination address %s does not match BTC or %s. Are you sure you got the right one?" % (args.destaddr, coin.ticker))
 
     for txid, txindex, bciscript, satoshis in addr_txs:
-        if bciscript != srcscript:
-            raise Exception("Script type in source output that is not supported!")
-
-if args.destaddr.startswith("bc1"):
-    addr = bech32decode(args.destaddr)
-    assert len(addr) == 20
-    print "YOU ARE TRYING TO SEND TO A bech32 ADDRESS! THIS IS NOT NORMAL! Are you sure you know what you're doing?"
-    get_consent("I am aware that the destination address is bech32")
-    outscript = "\x00\x14" + addr
-else:
-    addr = b58decode(args.destaddr)
-    assert len(addr) == 21
-    if addr[0] == "\x00" or addr[0] == coin.PUBKEY_ADDRESS:
-        outscript = "\x76\xa9\x14" + addr[1:] + "\x88\xac"
-    elif addr[0] == "\x05" or addr[0] == coin.SCRIPT_ADDRESS:
-        print "YOU ARE TRYING TO SEND TO A P2SH ADDRESS! THIS IS NOT NORMAL! Are you sure you know what you're doing?"
-        get_consent("I am aware that the destination address is P2SH")
-        outscript = "\xa9\x14" + addr[1:] + "\x87"
-    else:
-        raise Exception("The destination address %s does not match BTC or %s. Are you sure you got the right one?" % (args.destaddr, coin.ticker))
-
-inputs = []
-for txid, txindex, bciscript, satoshis in addr_txs:
-    inputs.append((txid, txindex, sourceh160, signscript, satoshis, privkey, pubkey, compressed, keytype))
+        inputs.append((txid, txindex, sourceh160, signscript, satoshis, privkey, pubkey, compressed, keytype))
+    total_sats += satoshis
 
 if keytype in ("p2pk", "standard", "segwit", "segwitbech32"):
-    tx, plaintx = coin.maketx(inputs, outscript, args.fee)
+    tx, plaintx = coin.maketx(inputs, outscript, args.fee, total_sats)
     txhash = doublesha(plaintx)
 else:
     raise Exception("Not implemented!")
