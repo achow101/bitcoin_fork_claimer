@@ -311,32 +311,33 @@ def identify_keytype(wifkey, addr):
             
         raise Exception("Unable to identify key type!")
 
-def get_tx_details_from_blockchaininfo(txid, addr, hardforkheight):
-    print "Querying blockchain.info API about data for transaction %s" % txid
-    res = urllib2.urlopen("https://blockchain.info/rawtx/%s" % txid)
-    txinfo = json.loads(res.read())
-    if hardforkheight < txinfo["block_height"]:
-        print "\n\nTHIS TRANSACTION HAPPENED AFTER THE COIN FORKED FROM THE MAIN CHAIN!"
-        print "(fork at height %d, this tx at %d)" % (hardforkheight, txinfo["block_height"])
-        print "You will most likely be unable to claim these coins."
-        print "Please look for an earlier transaction before the fork point.\n\n"
-        get_consent("I will try anyway")
-        
-    found = None
-    for outinfo in txinfo["out"]:
-        if outinfo["addr"] == addr:
-            txindex = outinfo["n"]
-            script = outinfo["script"].decode("hex")
-            satoshis = outinfo["value"]
-            print "Candidate transaction, index %d with %d Satoshis (%.8f BTC)" % (txindex, satoshis, satoshis / 100000000.0)
-            if found is None:
-                found = txindex, script, satoshis
-            else:
-                raise Exception("Multiple outputs with that address found! Aborting!")
+def get_addr_details_from_blockchaininfo(addr, hardforkheight):
+    print "Querying blockchain.info API about data for address %s" % addr
+    res = urllib2.urlopen("https://blockchain.info/rawaddr/%s" % addr)
+    addrinfo = json.loads(res.read())
+
+    if addrinfo['n_tx'] == 0:
+        raise Exception("Address %s has no spendable transactions" % addr)
+
+    found = []
+    for txinfo in addrinfo['txs']:
+        txid = txinfo['hash']
+        if 'block_height' not in txinfo or txinfo['block_height'] > hardforkheight:
+            continue
+        for outinfo in txinfo["out"]:
+            if outinfo["addr"] == addr and not outinfo['spent']:
+                txindex = outinfo["n"]
+                script = outinfo["script"].decode("hex")
+                satoshis = outinfo["value"]
+                print "Candidate transaction %s, index %d with %d Satoshis (%.8f BTC)" % (txid, txindex, satoshis, satoshis / 100000000.0)
+                if found is None:
+                    found.append((txid, txindex, script, satoshis))
+                else:
+                    raise Exception("Multiple outputs with that address found! Aborting!")
                 
     if not found:
-        raise Exception("No output with address %s found in transaction %s" % (addr, txid))
-        
+        raise Exception("Address %s has no spendable transactions" % addr)
+
     return found
     
 def get_btx_details_from_chainz_cryptoid(addr):
@@ -353,13 +354,14 @@ def get_btx_details_from_chainz_cryptoid(addr):
     if len(unspent_outputs) == 0:
         raise Exception("Block explorer didn't find any coins at that address")
     
-    outinfo = unspent_outputs[0]
-    txid = outinfo["tx_hash"]
-    txindex = outinfo["tx_ouput_n"]
-    script = outinfo["script"].decode("hex")
-    satoshis = int(outinfo["value"])
+    outputs = []
+    for outinfo in unspent_outputs:
+        txid = outinfo["tx_hash"]
+        txindex = outinfo["tx_ouput_n"]
+        script = outinfo["script"].decode("hex")
+        satoshis = int(outinfo["value"])
     
-    return txid, txindex, script, satoshis
+    return outputs
 
 def get_consent(consentstring):
     print "\nWrite '%s' to continue" % consentstring
@@ -942,11 +944,11 @@ assert gen_k_rfc6979(0xc9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b1
 
 parser = argparse.ArgumentParser()
 parser.add_argument("cointicker", help="Coin type", choices=["BTF", "BTW", "BTG", "BCX", "B2X", "UBTC", "SBTC", "BCD", "BPA", "BTN", "BTH", "BTV", "BTT", "BTX", "BTP", "BCK", "CDY", "BTSQ", "WBTC", "BCH"])
-parser.add_argument("txid", help="Transaction ID with the source of the coins, dummy value for BTX")
 parser.add_argument("wifkey", help="Private key of the coins to be claimed in WIF (wallet import) format")
 parser.add_argument("srcaddr", help="Source address of the coins")
 parser.add_argument("destaddr", help="Destination address of the coins")
 parser.add_argument("--fee", help="Fee measured in Satoshis, default is 1000", type=int, default=1000)
+parser.add_argument("--txid", help="Transaction ID with the source of the coins, skips blockchain.info API query", type=str)
 parser.add_argument("--txindex", help="Manually specified txindex, skips blockchain.info API query", type=int)
 parser.add_argument("--satoshis", help="Manually specified number of satoshis, skips blockchain.info API query", type=int)
 parser.add_argument("--p2pk", help="Source is P2PK. Use this if you have REALLY old coins (2009-2010) and normal mode fails", action="store_true")
@@ -1022,18 +1024,19 @@ if keytype in ("p2pk", "standard"):
 else:
     signscript = "\x76\xa9\x14" + sourceh160 + "\x88\xac"
 
-if args.txindex is not None and args.satoshis is not None:
-    txindex, satoshis = args.txindex, args.satoshis
+if args.txid is not None and args.txindex is not None and args.satoshis is not None:
+    txid, txindex, satoshis = args.txindex, args.txindex, args.satoshis
 else:
     if args.cointicker == "BTX":
-        args.txid, txindex, bciscript, satoshis = get_btx_details_from_chainz_cryptoid(args.srcaddr)
+        addr_txs = get_btx_details_from_chainz_cryptoid(args.srcaddr)
     elif args.cointicker == "CDY":
         raise Exception("Block explorer for BCH forks not supported yet. Please specify txindex and satoshis manually.")
     else:
-        txindex, bciscript, satoshis = get_tx_details_from_blockchaininfo(args.txid, args.srcaddr, coin.hardforkheight)
-    
-    if bciscript != srcscript:
-        raise Exception("Script type in source output that is not supported!")
+        addr_txs = get_addr_details_from_blockchaininfo(args.srcaddr, coin.hardforkheight)
+
+    for txid, txindex, bciscript, satoshis in addr_txs:
+        if bciscript != srcscript:
+            raise Exception("Script type in source output that is not supported!")
 
 if args.destaddr.startswith("bc1"):
     addr = bech32decode(args.destaddr)
@@ -1053,8 +1056,12 @@ else:
     else:
         raise Exception("The destination address %s does not match BTC or %s. Are you sure you got the right one?" % (args.destaddr, coin.ticker))
 
+inputs = []
+for txid, txindex, bciscript, satoshis in addr_txs:
+    inputs.append((txid, txindex, sourceh160, signscript, satoshis, privkey, pubkey, compressed, keytype))
+
 if keytype in ("p2pk", "standard", "segwit", "segwitbech32"):
-    tx, plaintx = coin.maketx([](args.txid, txindex, sourceh160, signscript, satoshis, privkey, pubkey, compressed, keytype)], outscript, args.fee)
+    tx, plaintx = coin.maketx(inputs, outscript, args.fee)
     txhash = doublesha(plaintx)
 else:
     raise Exception("Not implemented!")
