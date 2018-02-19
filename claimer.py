@@ -682,7 +682,7 @@ class BitcoinFork(object):
                 if sourcetx_in == sourcetx and sourceidx == sourceidx_in:
                     to_sign += prevout + inscript + sequence
                 else:
-                    prevout_in = sourcetx.decode("hex")[::-1] + struct.pack("<I", sourceidx)
+                    prevout_in = sourcetx_in.decode("hex")[::-1] + struct.pack("<I", sourceidx_in)
                     to_sign += prevout_in + make_varint(0) + sequence
 
             to_sign += make_varint(1) + txout + locktime + sigtype + self.extrabytes
